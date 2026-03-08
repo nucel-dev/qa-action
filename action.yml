@@ -1,0 +1,253 @@
+name: 'Nucel QA'
+description: 'Autonomous AI QA testing — Nucel QA + Claude run 7 behavioral personas against your app'
+author: 'Nucel'
+
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  url:
+    description: 'Target URL to test'
+    required: true
+
+  personas:
+    description: 'Comma-separated list of personas to run (default: all 7)'
+    required: false
+    default: ''
+
+  chrome-flags:
+    description: 'Additional Chrome flags (space-separated)'
+    required: false
+    default: ''
+
+  comment-on-pr:
+    description: 'Post QA report as a PR comment'
+    required: false
+    default: 'true'
+
+  anthropic-api-key:
+    description: 'Anthropic API key for Claude (required to run QA session)'
+    required: true
+
+  version:
+    description: 'Nucel QA version to install (default: latest)'
+    required: false
+    default: 'latest'
+
+  model:
+    description: 'Claude model to use'
+    required: false
+    default: 'claude-opus-4-6'
+
+outputs:
+  report:
+    description: 'QA report in markdown format'
+    value: ${{ steps.qa-run.outputs.report }}
+
+  findings-count:
+    description: 'Total number of findings logged'
+    value: ${{ steps.qa-run.outputs.findings_count }}
+
+  report-path:
+    description: 'Path to the written report file'
+    value: ${{ steps.qa-run.outputs.report_path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Nucel QA
+      id: install-nucel-qa
+      shell: bash
+      env:
+        NUCEL_QA_VERSION: ${{ inputs.version }}
+      run: |
+        BINARY_NAME="nucel-qa"
+        REPO="nucel-dev/nucel-qa"
+
+        # Detect OS
+        case "$(uname -s)" in
+          Darwin) OS="apple-darwin" ;;
+          Linux)  OS="unknown-linux-gnu" ;;
+          MINGW*|MSYS*|CYGWIN*) OS="pc-windows-msvc" ;;
+          *)
+            echo "Unsupported OS: $(uname -s)" >&2
+            exit 1
+            ;;
+        esac
+
+        # Detect architecture
+        case "$(uname -m)" in
+          arm64|aarch64) ARCH="aarch64" ;;
+          x86_64|amd64)  ARCH="x86_64" ;;
+          *)
+            echo "Unsupported architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        # File extension for Windows
+        EXT=""
+        if [[ "$OS" == "pc-windows-msvc" ]]; then
+          EXT=".exe"
+        fi
+
+        ASSET="${BINARY_NAME}-${ARCH}-${OS}${EXT}"
+
+        # Resolve version
+        if [ "${NUCEL_QA_VERSION}" = "latest" ]; then
+          echo "Resolving latest Nucel QA release..."
+          TAG=$(curl -fsSL \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name"' \
+            | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+        else
+          TAG="${NUCEL_QA_VERSION}"
+        fi
+
+        if [ -z "$TAG" ]; then
+          echo "Error: could not resolve Nucel QA version" >&2
+          exit 1
+        fi
+
+        BINARY_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+        CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${TAG}/checksums.txt"
+
+        echo "Installing Nucel QA ${TAG} (${ARCH}/${OS})..."
+
+        INSTALL_DIR="${HOME}/.local/bin"
+        mkdir -p "$INSTALL_DIR"
+
+        TMP_DIR="$(mktemp -d)"
+        trap 'rm -rf "$TMP_DIR"' EXIT
+
+        curl -fsSL "$BINARY_URL" -o "${TMP_DIR}/${BINARY_NAME}${EXT}"
+        curl -fsSL "$CHECKSUMS_URL" -o "${TMP_DIR}/checksums.txt" 2>/dev/null || true
+
+        # Verify checksum if available
+        if [ -s "${TMP_DIR}/checksums.txt" ]; then
+          EXPECTED="$(grep "${ASSET}" "${TMP_DIR}/checksums.txt" | awk '{print $1}')"
+          if [ -n "$EXPECTED" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              ACTUAL="$(sha256sum "${TMP_DIR}/${BINARY_NAME}${EXT}" | awk '{print $1}')"
+            elif command -v shasum >/dev/null 2>&1; then
+              ACTUAL="$(shasum -a 256 "${TMP_DIR}/${BINARY_NAME}${EXT}" | awk '{print $1}')"
+            fi
+            if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "Checksum mismatch! Expected: $EXPECTED  Got: $ACTUAL" >&2
+              exit 1
+            fi
+            echo "Checksum verified."
+          fi
+        fi
+
+        chmod +x "${TMP_DIR}/${BINARY_NAME}${EXT}"
+        cp "${TMP_DIR}/${BINARY_NAME}${EXT}" "${INSTALL_DIR}/${BINARY_NAME}${EXT}"
+        echo "${INSTALL_DIR}" >> "$GITHUB_PATH"
+
+        echo "nucel-qa ${TAG} installed to ${INSTALL_DIR}"
+        echo "nucel_qa_version=${TAG}" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --production
+
+    - name: Start Nucel QA server
+      id: start-server
+      shell: bash
+      env:
+        NUCEL_TRANSPORT: http
+        NUCEL_QA_HEADLESS: '1'
+        NUCEL_BIND: '127.0.0.1:18080'
+      run: |
+        CHROME_FLAGS="${{ inputs.chrome-flags }}"
+        if [ -n "$CHROME_FLAGS" ]; then
+          nucel-qa $CHROME_FLAGS &
+        else
+          nucel-qa &
+        fi
+        NUCEL_PID=$!
+        echo "nucel_pid=${NUCEL_PID}" >> "$GITHUB_OUTPUT"
+        echo "Started nucel-qa server (PID: ${NUCEL_PID})"
+
+        # Wait up to 30s for server to be ready
+        echo "Waiting for nucel-qa to be ready..."
+        for i in $(seq 1 30); do
+          if curl -sf http://127.0.0.1:18080/mcp > /dev/null 2>&1; then
+            echo "nucel-qa ready after ${i}s"
+            break
+          fi
+          if ! kill -0 "$NUCEL_PID" 2>/dev/null; then
+            echo "Error: nucel-qa process exited unexpectedly" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+
+    - name: Run QA session
+      id: qa-run
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        QA_URL: ${{ inputs.url }}
+        QA_PERSONAS: ${{ inputs.personas }}
+        QA_MODEL: ${{ inputs.model }}
+        NUCEL_QA_SERVER_URL: 'http://127.0.0.1:18080/mcp'
+        QA_REPORT_OUTPUT: '/tmp/nucel-qa-report.md'
+      run: node ${{ github.action_path }}/scripts/run-qa.mjs
+
+    - name: Stop Nucel QA server
+      if: always()
+      shell: bash
+      run: |
+        PID="${{ steps.start-server.outputs.nucel_pid }}"
+        if [ -n "$PID" ]; then
+          kill "$PID" 2>/dev/null || true
+          echo "Stopped nucel-qa server (PID: $PID)"
+        fi
+
+    - name: Post PR comment
+      if: ${{ inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      uses: actions/github-script@v7
+      env:
+        QA_REPORT_PATH: '/tmp/nucel-qa-report.md'
+      with:
+        script: |
+          const fs = require('fs');
+          const reportPath = process.env.QA_REPORT_PATH;
+
+          if (!reportPath || !fs.existsSync(reportPath)) {
+            console.log('No report file found, skipping PR comment');
+            return;
+          }
+
+          const report = fs.readFileSync(reportPath, 'utf8').trim();
+          if (!report) {
+            console.log('Report is empty, skipping PR comment');
+            return;
+          }
+
+          const body = [
+            '## 🔍 Nucel QA Report',
+            '',
+            report,
+            '',
+            '---',
+            `*Powered by [Nucel QA](https://github.com/nucel-dev/nucel-qa) · Tested URL: \`${{ inputs.url }}\`*`,
+          ].join('\n');
+
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body,
+          });
+
+          console.log('Posted QA report as PR comment');

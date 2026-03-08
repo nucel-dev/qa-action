@@ -1,0 +1,14 @@
+{
+  "name": "nucel-qa-action",
+  "version": "1.0.0",
+  "description": "Nucel QA GitHub Action runner",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.10.0"
+  }
+}
