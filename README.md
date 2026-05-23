@@ -211,6 +211,15 @@ Claude connects to nucel-qa via the MCP protocol and calls tools like `qa_start_
 
 ---
 
+## Documentation
+
+- [docs/configuration.md](docs/configuration.md) — every input and output, with examples
+- [docs/troubleshooting.md](docs/troubleshooting.md) — common failure modes (missing API key, OOM, Chrome not installed, MCP handshake fails)
+- [docs/integration-with-nucel-qa.md](docs/integration-with-nucel-qa.md) — architecture diagram and version compatibility matrix
+- [CHANGELOG.md](CHANGELOG.md) — release history
+
+---
+
 ## License
 
 [MIT](LICENSE) — Copyright 2026 Nucel (nucel.dev)
