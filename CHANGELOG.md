@@ -10,15 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `examples/` — three runnable workflow examples (`qa-on-pr.yml`,
+  `qa-on-deploy.yml`, `qa-matrix.yml`) plus an `examples/README.md` index.
+- `docs/personas/` — one page per persona (`new-user`, `stupid-user`,
+  `power-user`, `impatient-user`, `accessibility-user`, `mobile-user`,
+  `seo-bot`) plus a persona index, each describing when to use, when to
+  skip, sample findings, and the `personas:` invocation snippet.
+- `docs/inputs-reference.md` — every `action.yml` input documented with
+  worked YAML examples.
+- `docs/outputs-reference.md` — every action output documented with
+  realistic downstream-step examples (artifact upload, release asset,
+  Datadog metric, custom PR comment, job summary).
+- `docs/marketplace.md` — internal maintainer guide for preparing the
+  GitHub Marketplace listing: eligibility checklist, branding policy,
+  README requirements, tagging conventions (full SemVer + floating
+  major), version-pinning recommendation, release checklist.
+- `.github/workflows/test.yml` — smoke-test workflow that validates
+  `action.yml`, the example workflows, npm install, the runner script,
+  and (when `ANTHROPIC_API_KEY` is configured) runs the action end-to-end
+  against a sandbox URL and asserts on its outputs.
 - `docs/configuration.md` — full reference for every input and output.
 - `docs/troubleshooting.md` — common failure modes and fixes.
 - `docs/integration-with-nucel-qa.md` — architecture diagram and version
   compatibility matrix between the action, `nucel-qa`, and the SDKs.
 - `CHANGELOG.md` (this file).
 
+### Changed
+- `README.md` — restructured Documentation section to link to the new
+  references, persona pages, example workflows, and maintainer docs.
+
 ### Notes
-- No code, `action.yml`, or `package.json` changes were made in this entry
-  — documentation-only update.
+- No code, `action.yml`, `scripts/run-qa.mjs`, or `package.json` changes
+  were made — documentation, examples, and CI-only update.
 
 ---
 

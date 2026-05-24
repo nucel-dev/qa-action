@@ -1,0 +1,86 @@
+# Multi-persona matrix
+#
+# Runs each persona in its own job so they execute in parallel and each
+# produces its own artifact. This is the right shape when:
+#   - You want isolated reports per persona (e.g. accessibility goes to the
+#     a11y owner, SEO goes to marketing).
+#   - The full 7-persona run OOMs your default runner.
+#   - You want to fail the build on, say, accessibility findings but not SEO.
+#
+# Trade-off: 7 jobs x Anthropic API cost each. Pin a smaller `model:` if cost
+# matters more than depth.
+
+name: QA matrix
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        persona:
+          - new-user
+          - stupid-user
+          - power-user
+          - impatient-user
+          - accessibility-user
+          - mobile-user
+          - seo-bot
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install and build app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Start app (background)
+        run: npm start &
+
+      - name: Wait for app
+        run: npx --yes wait-on http://localhost:3000 --timeout 60000
+
+      - name: Run Nucel QA
+        id: qa
+        uses: nucel-dev/qa-action@v1
+        with:
+          url: 'http://localhost:3000'
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          personas: ${{ matrix.persona }}
+          # Only the new-user job posts a PR comment to avoid 7 separate
+          # comments per PR.
+          comment-on-pr: ${{ matrix.persona == 'new-user' }}
+
+      - name: Upload per-persona report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nucel-qa-report-${{ matrix.persona }}
+          path: ${{ steps.qa.outputs.report-path }}
+          if-no-files-found: warn
+
+      - name: Fail on accessibility findings
+        if: ${{ matrix.persona == 'accessibility-user' }}
+        env:
+          FINDINGS: ${{ steps.qa.outputs.findings-count }}
+        run: |
+          echo "Accessibility findings: $FINDINGS"
+          if [ "${FINDINGS:-0}" -gt 0 ]; then
+            echo "::error::Accessibility findings detected - see uploaded report"
+            exit 1
+          fi

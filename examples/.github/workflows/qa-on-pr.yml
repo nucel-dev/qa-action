@@ -1,0 +1,59 @@
+# Basic PR-time QA
+#
+# Runs the full Nucel QA suite on every pull request against the locally-built
+# app, then posts the report as a PR comment. This is the "drop-in" workflow —
+# copy it to .github/workflows/qa.yml in your repo and set ANTHROPIC_API_KEY
+# in repo secrets.
+#
+# Requirements:
+#   - secrets.ANTHROPIC_API_KEY       (Anthropic Messages API key)
+#   - `npm start` boots the app on http://localhost:3000
+#   - PR triggers from same-repo branches (forks need pull_request_target)
+
+name: QA on PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write   # required for comment-on-pr
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install and build app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Start app (background)
+        run: npm start &
+
+      - name: Wait for app to accept traffic
+        run: npx --yes wait-on http://localhost:3000 --timeout 60000
+
+      - name: Run Nucel QA
+        id: qa
+        uses: nucel-dev/qa-action@v1
+        with:
+          url: 'http://localhost:3000'
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Upload QA report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nucel-qa-report
+          path: ${{ steps.qa.outputs.report-path }}
+          if-no-files-found: warn

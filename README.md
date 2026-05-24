@@ -213,9 +213,33 @@ Claude connects to nucel-qa via the MCP protocol and calls tools like `qa_start_
 
 ## Documentation
 
-- [docs/configuration.md](docs/configuration.md) — every input and output, with examples
+### References
+
+- [docs/inputs-reference.md](docs/inputs-reference.md) — every `action.yml` input with worked examples
+- [docs/outputs-reference.md](docs/outputs-reference.md) — every output with downstream-step examples
+- [docs/configuration.md](docs/configuration.md) — overview of inputs, outputs, and the internal environment
 - [docs/troubleshooting.md](docs/troubleshooting.md) — common failure modes (missing API key, OOM, Chrome not installed, MCP handshake fails)
 - [docs/integration-with-nucel-qa.md](docs/integration-with-nucel-qa.md) — architecture diagram and version compatibility matrix
+
+### Personas
+
+One page per persona, explaining when to use and when to skip:
+
+- [docs/personas/](docs/personas/README.md) — index
+- [new-user](docs/personas/new-user.md) · [stupid-user](docs/personas/stupid-user.md) · [power-user](docs/personas/power-user.md) · [impatient-user](docs/personas/impatient-user.md) · [accessibility-user](docs/personas/accessibility-user.md) · [mobile-user](docs/personas/mobile-user.md) · [seo-bot](docs/personas/seo-bot.md)
+
+### Examples
+
+Runnable workflow snippets you can copy into your own repo:
+
+- [examples/](examples/README.md) — index
+- [qa-on-pr.yml](examples/.github/workflows/qa-on-pr.yml) — basic PR-time QA
+- [qa-on-deploy.yml](examples/.github/workflows/qa-on-deploy.yml) — post-deploy verification
+- [qa-matrix.yml](examples/.github/workflows/qa-matrix.yml) — multi-persona parallel matrix
+
+### Maintainer docs
+
+- [docs/marketplace.md](docs/marketplace.md) — preparing for and maintaining the GitHub Marketplace listing
 - [CHANGELOG.md](CHANGELOG.md) — release history
 
 ---
