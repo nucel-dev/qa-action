@@ -1,0 +1,157 @@
+# Smoke test for nucel-dev/qa-action
+#
+# Validates the action against a known-good sandbox URL. Runs on:
+#   - every push to main
+#   - every PR (same-repo only; forks skip the live run)
+#   - weekly cron (catches drift in nucel-qa releases / Anthropic API)
+#   - manual workflow_dispatch
+#
+# The sandbox URL defaults to https://example.com - small, stable, no auth
+# required, predictable across runs. Override via workflow_dispatch input
+# when testing against a richer target.
+#
+# Requirements:
+#   - secrets.ANTHROPIC_API_KEY at the repo (or org) level.
+#     If not configured, the smoke test will be skipped (not failed).
+
+name: smoke-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      sandbox_url:
+        description: 'URL to QA (defaults to https://example.com)'
+        required: false
+        type: string
+        default: 'https://example.com'
+      personas:
+        description: 'Comma-separated personas (defaults to a cheap subset)'
+        required: false
+        type: string
+        default: 'new-user,seo-bot'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  yaml-lint:
+    name: Validate action.yml and workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify action.yml parses
+        run: |
+          python3 -c "import yaml; yaml.safe_load(open('action.yml'))"
+          echo "action.yml is valid YAML"
+
+      - name: Verify package.json parses
+        run: |
+          python3 -c "import json; json.load(open('package.json'))"
+          echo "package.json is valid JSON"
+
+      - name: Verify example and CI workflows parse
+        run: |
+          for f in examples/.github/workflows/*.yml .github/workflows/*.yml; do
+            echo "Checking $f"
+            python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$f"
+          done
+          echo "All workflow YAML parsed successfully"
+
+  node-install:
+    name: Verify node dependencies install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: npm ci --production
+        run: npm ci --production
+
+      - name: Verify runner script parses
+        run: node --check scripts/run-qa.mjs
+
+  smoke:
+    name: Run action against sandbox
+    runs-on: ubuntu-latest
+    needs: [yaml-lint, node-install]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check ANTHROPIC_API_KEY is available
+        id: check-key
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not configured - skipping smoke run"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve sandbox URL
+        if: steps.check-key.outputs.skip != 'true'
+        id: resolve
+        env:
+          DISPATCH_URL: ${{ inputs.sandbox_url }}
+          DISPATCH_PERSONAS: ${{ inputs.personas }}
+        run: |
+          url="${DISPATCH_URL:-https://example.com}"
+          personas="${DISPATCH_PERSONAS:-new-user,seo-bot}"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "personas=$personas" >> "$GITHUB_OUTPUT"
+
+      - name: Run action (self-test)
+        if: steps.check-key.outputs.skip != 'true'
+        id: qa
+        uses: ./
+        with:
+          url: ${{ steps.resolve.outputs.url }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          personas: ${{ steps.resolve.outputs.personas }}
+          comment-on-pr: 'false'
+
+      - name: Verify outputs are populated
+        if: steps.check-key.outputs.skip != 'true'
+        env:
+          REPORT_PATH: ${{ steps.qa.outputs.report-path }}
+          FINDINGS: ${{ steps.qa.outputs.findings-count }}
+        run: |
+          echo "report-path: $REPORT_PATH"
+          echo "findings-count: $FINDINGS"
+          if [ -z "$REPORT_PATH" ]; then
+            echo "::error::report-path output is empty"
+            exit 1
+          fi
+          if [ ! -s "$REPORT_PATH" ]; then
+            echo "::error::report file at $REPORT_PATH is empty"
+            exit 1
+          fi
+          case "$FINDINGS" in
+            ''|*[!0-9]*)
+              echo "::error::findings-count is not an integer: '$FINDINGS'"
+              exit 1
+              ;;
+          esac
+          echo "All outputs validated"
+
+      - name: Upload smoke-test report
+        if: steps.check-key.outputs.skip != 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-report
+          path: ${{ steps.qa.outputs.report-path }}
+          if-no-files-found: warn
