@@ -19,6 +19,13 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import fs from 'fs';
+import {
+  parsePersonas,
+  extractReport,
+  countFindings,
+  evaluateSeverityGate,
+  formatOutputEntry,
+} from './lib.mjs';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -30,6 +37,7 @@ const {
   QA_MODEL = 'claude-opus-4-6',
   NUCEL_QA_SERVER_URL = 'http://127.0.0.1:18080/mcp',
   QA_REPORT_OUTPUT = '/tmp/nucel-qa-report.md',
+  QA_FAIL_ON_SEVERITY = 'none',
   GITHUB_OUTPUT,
 } = process.env;
 
@@ -43,9 +51,19 @@ if (!QA_URL) {
   process.exit(1);
 }
 
-const personas = QA_PERSONAS
-  ? QA_PERSONAS.split(',').map((p) => p.trim()).filter(Boolean)
-  : [];
+// Validate QA_URL is a real http(s) URL early — a bad URL otherwise surfaces as
+// an opaque agent failure deep in the session.
+try {
+  const parsed = new URL(QA_URL);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`unsupported protocol "${parsed.protocol}"`);
+  }
+} catch (err) {
+  console.error(`Error: QA_URL is not a valid http(s) URL: ${QA_URL} (${err.message})`);
+  process.exit(1);
+}
+
+const personas = parsePersonas(QA_PERSONAS);
 
 // ---------------------------------------------------------------------------
 // MCP client setup
@@ -136,6 +154,11 @@ async function runAgentLoop(anthropic, mcpClient, tools) {
   const { system, user } = buildPrompt();
   const messages = [{ role: 'user', content: user }];
 
+  // Accumulate ALL assistant text across turns. The <report> block may be
+  // emitted in a turn that still ends in tool_use (e.g. before qa_end_session),
+  // so we must not rely solely on the final end_turn message.
+  const transcript = [];
+
   let iteration = 0;
   const MAX_ITERATIONS = 80; // safety cap
 
@@ -156,21 +179,16 @@ async function runAgentLoop(anthropic, mcpClient, tools) {
 
     console.log(`  stop_reason: ${response.stop_reason}`);
 
-    // Extract any text blocks for progress visibility
+    // Collect every text block from this turn into the running transcript.
     for (const block of response.content) {
       if (block.type === 'text' && block.text.trim()) {
+        transcript.push(block.text);
         console.log(`  Claude: ${block.text.slice(0, 300)}${block.text.length > 300 ? '…' : ''}`);
       }
     }
 
     if (response.stop_reason === 'end_turn') {
-      // Collect all text from assistant and look for <report>…</report>
-      const allText = response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n');
-
-      return allText;
+      return transcript.join('\n');
     }
 
     if (response.stop_reason !== 'tool_use') {
@@ -195,34 +213,15 @@ async function runAgentLoop(anthropic, mcpClient, tools) {
   }
 
   console.warn('Warning: reached max iterations without end_turn');
-  return '';
+  return transcript.join('\n');
 }
 
 // ---------------------------------------------------------------------------
-// Extract <report>…</report> from Claude's final output
-// ---------------------------------------------------------------------------
-function extractReport(text) {
-  const match = text.match(/<report>([\s\S]*?)<\/report>/i);
-  if (match) return match[1].trim();
-
-  // Fallback: if no tags, return everything after a markdown heading
-  const headingMatch = text.match(/^#[^\n]*/m);
-  if (headingMatch) {
-    return text.slice(headingMatch.index).trim();
-  }
-
-  return text.trim();
-}
-
-// ---------------------------------------------------------------------------
-// Set a GitHub Actions output (supports multiline via delimiter)
+// Set a GitHub Actions output (supports multiline via collision-proof delimiter)
 // ---------------------------------------------------------------------------
 function setOutput(name, value) {
   if (!GITHUB_OUTPUT) return;
-
-  const delimiter = `ghadelimiter_${Date.now()}`;
-  const escaped = String(value);
-  fs.appendFileSync(GITHUB_OUTPUT, `${name}<<${delimiter}\n${escaped}\n${delimiter}\n`);
+  fs.appendFileSync(GITHUB_OUTPUT, formatOutputEntry(name, value));
 }
 
 // ---------------------------------------------------------------------------
@@ -253,26 +252,48 @@ async function main() {
   // Disconnect MCP
   try { await mcpClient.close(); } catch (_) {}
 
-  // Extract report
+  // Extract report (from accumulated transcript, last <report> block wins)
   const report = extractReport(finalOutput);
 
-  if (!report) {
-    console.error('Warning: could not extract a QA report from Claude output.');
-  } else {
-    console.log(`\nReport length: ${report.length} chars`);
-  }
+  // Count findings by severity.
+  const counts = countFindings(report);
+  const findingsCount = counts.total;
 
-  // Write report to file
+  // Always write the report file + outputs, even on failure paths, so
+  // downstream steps (artifact upload, PR comment) still have something.
   fs.writeFileSync(QA_REPORT_OUTPUT, report || '(no report generated)', 'utf8');
   console.log(`Report written to ${QA_REPORT_OUTPUT}`);
 
-  // Count findings (heuristic: lines starting with severity markers)
-  const findingsCount = (report.match(/^\s*[|]?\s*(critical|high|medium|low)\s*[|]/gim) ?? []).length;
-
-  // Set GitHub Actions outputs
   setOutput('report', report);
   setOutput('report_path', QA_REPORT_OUTPUT);
   setOutput('findings_count', String(findingsCount));
+  setOutput('critical_count', String(counts.bySeverity.critical));
+  setOutput('high_count', String(counts.bySeverity.high));
+
+  // A missing report means the QA session did NOT complete — fail the workflow
+  // rather than silently passing (the previous behaviour always exited 0).
+  if (!report) {
+    console.error(
+      '::error::Nucel QA produced no report — the session did not complete. Check the logs above.',
+    );
+    process.exit(1);
+  }
+
+  console.log(`\nReport length: ${report.length} chars`);
+  console.log(
+    `Findings: ${findingsCount} total ` +
+      `(critical=${counts.bySeverity.critical}, high=${counts.bySeverity.high}, ` +
+      `medium=${counts.bySeverity.medium}, low=${counts.bySeverity.low})`,
+  );
+
+  // Severity gate: optionally fail the workflow on findings at/above a threshold.
+  const gate = evaluateSeverityGate(counts, QA_FAIL_ON_SEVERITY);
+  console.log(`Severity gate (fail-on-severity=${QA_FAIL_ON_SEVERITY}): ${gate.reason}`);
+  if (gate.shouldFail) {
+    console.error(`::error::QA severity gate failed — ${gate.reason}`);
+    console.log('\n=== QA session complete (gate failed) ===');
+    process.exit(2);
+  }
 
   console.log('\n=== QA session complete ===');
   process.exit(0);

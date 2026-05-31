@@ -76,11 +76,14 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: npm ci --production
-        run: npm ci --production
+      - name: npm ci --omit=dev
+        run: npm ci --omit=dev
 
-      - name: Verify runner script parses
-        run: node --check scripts/run-qa.mjs
+      - name: Lint scripts (syntax check)
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
 
   smoke:
     name: Run action against sandbox

@@ -40,6 +40,14 @@ inputs:
     required: false
     default: 'claude-opus-4-6'
 
+  fail-on-severity:
+    description: >-
+      Fail the workflow when findings at or above this severity are reported.
+      One of: none, low, medium, high, critical. Default "none" never fails on
+      findings (the action still fails if the QA session itself errors).
+    required: false
+    default: 'none'
+
 outputs:
   report:
     description: 'QA report in markdown format'
@@ -48,6 +56,14 @@ outputs:
   findings-count:
     description: 'Total number of findings logged'
     value: ${{ steps.qa-run.outputs.findings_count }}
+
+  critical-count:
+    description: 'Number of critical-severity findings'
+    value: ${{ steps.qa-run.outputs.critical_count }}
+
+  high-count:
+    description: 'Number of high-severity findings'
+    value: ${{ steps.qa-run.outputs.high_count }}
 
   report-path:
     description: 'Path to the written report file'
@@ -157,7 +173,7 @@ runs:
     - name: Install action dependencies
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: npm ci --production
+      run: npm ci --omit=dev
 
     - name: Start Nucel QA server
       id: start-server
@@ -179,9 +195,11 @@ runs:
 
         # Wait up to 30s for server to be ready
         echo "Waiting for nucel-qa to be ready..."
+        READY=0
         for i in $(seq 1 30); do
           if curl -sf http://127.0.0.1:18080/mcp > /dev/null 2>&1; then
             echo "nucel-qa ready after ${i}s"
+            READY=1
             break
           fi
           if ! kill -0 "$NUCEL_PID" 2>/dev/null; then
@@ -191,6 +209,12 @@ runs:
           sleep 1
         done
 
+        if [ "$READY" -ne 1 ]; then
+          echo "Error: nucel-qa did not become ready within 30s" >&2
+          kill "$NUCEL_PID" 2>/dev/null || true
+          exit 1
+        fi
+
     - name: Run QA session
       id: qa-run
       shell: bash
@@ -199,6 +223,7 @@ runs:
         QA_URL: ${{ inputs.url }}
         QA_PERSONAS: ${{ inputs.personas }}
         QA_MODEL: ${{ inputs.model }}
+        QA_FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
         NUCEL_QA_SERVER_URL: 'http://127.0.0.1:18080/mcp'
         QA_REPORT_OUTPUT: '/tmp/nucel-qa-report.md'
       run: node ${{ github.action_path }}/scripts/run-qa.mjs

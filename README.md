@@ -64,6 +64,7 @@ That's it. Claude will discover your app, test every page with 7 personas, and p
 | `comment-on-pr` | | `true` | Post QA report as a PR comment |
 | `version` | | `latest` | Nucel QA version to install (e.g. `v0.2.0`) |
 | `model` | | `claude-opus-4-6` | Claude model to use |
+| `fail-on-severity` | | `none` | Fail the workflow when findings at or above this severity are found. One of `none`, `low`, `medium`, `high`, `critical` |
 
 ### Available personas
 
@@ -85,7 +86,9 @@ That's it. Claude will discover your app, test every page with 7 personas, and p
 |--------|-------------|
 | `report` | Full QA report in markdown format |
 | `report-path` | Path to the written report file |
-| `findings-count` | Number of findings logged |
+| `findings-count` | Total number of findings logged |
+| `critical-count` | Number of critical-severity findings |
+| `high-count` | Number of high-severity findings |
 
 ### Using outputs in downstream steps
 
@@ -104,9 +107,36 @@ That's it. Claude will discover your app, test every page with 7 personas, and p
 
 - name: Fail if critical findings
   run: |
-    COUNT="${{ steps.qa.outputs.findings-count }}"
-    echo "Total findings: $COUNT"
+    COUNT="${{ steps.qa.outputs.critical-count }}"
+    echo "Critical findings: $COUNT"
+    if [ "$COUNT" -gt 0 ]; then exit 1; fi
 ```
+
+---
+
+## Failing the workflow on findings
+
+By default the action only fails the workflow when the **QA session itself
+errors** (no report could be produced). Findings are reported but do not fail
+the build, so you can adopt it without breaking existing pipelines.
+
+To turn findings into a gate, set `fail-on-severity`:
+
+```yaml
+- uses: nucel-dev/qa-action@v1
+  with:
+    url: 'http://localhost:3000'
+    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    fail-on-severity: 'high'   # fail on any high or critical finding
+```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | QA completed; no findings at/above the `fail-on-severity` threshold |
+| `1` | QA session failed (e.g. no report produced, MCP/Anthropic error) |
+| `2` | QA completed but findings at/above `fail-on-severity` were found |
 
 ---
 

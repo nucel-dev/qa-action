@@ -10,6 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `fail-on-severity` input — optionally fail the workflow when findings at or
+  above a severity threshold (`low`/`medium`/`high`/`critical`) are reported.
+  Defaults to `none` (findings reported but never fail the build).
+- `critical-count` and `high-count` outputs for per-severity gating in
+  downstream steps.
+- `scripts/lib.mjs` — extracted pure helpers (`parsePersonas`, `extractReport`,
+  `countFindings`, `evaluateSeverityGate`, `formatOutputEntry`) so the core
+  logic is unit-testable without the Anthropic API or an MCP server.
+- `scripts/lib.test.mjs` — 24 unit tests on the Node built-in test runner;
+  `npm test` and `npm run lint` scripts.
+- README: "Failing the workflow on findings" section with documented exit codes
+  (`0` clean, `1` session error, `2` severity gate tripped).
+
+### Fixed
+- **Report extraction across turns.** The runner now accumulates assistant text
+  across *all* agent turns and uses the last `<report>…</report>` block. The
+  previous version only inspected the final `end_turn` message, so a report
+  emitted before `qa_end_session` was silently lost.
+- **Workflow now fails when QA does not complete.** `run-qa.mjs` exits non-zero
+  when no report can be extracted; previously it always exited `0`, masking
+  failed sessions.
+- **Server-readiness wait now fails loudly.** `action.yml` exits with an error
+  if `nucel-qa` does not become ready within 30s instead of silently proceeding
+  to a connection that fails less cleanly.
+- **GitHub Actions output delimiter** is now collision-proof against report
+  content (guards against multiline-output corruption/injection).
+- Early validation of `url` as a real `http(s)` URL, surfacing bad input
+  immediately instead of as an opaque mid-session agent error.
+
+### Changed
+- `npm ci --production` → `npm ci --omit=dev` (the former flag is deprecated).
+- `.github/workflows/test.yml` now runs `npm run lint` and `npm test` (unit
+  tests) in the `node-install` job.
+
+### Added (docs/examples — prior doc wave)
 - `examples/` — three runnable workflow examples (`qa-on-pr.yml`,
   `qa-on-deploy.yml`, `qa-matrix.yml`) plus an `examples/README.md` index.
 - `docs/personas/` — one page per persona (`new-user`, `stupid-user`,
