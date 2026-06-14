@@ -12,7 +12,7 @@
     "lint": "node --check scripts/run-qa.mjs && node --check scripts/lib.mjs && node --check scripts/lib.test.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@modelcontextprotocol/sdk": "^1.10.0"
+    "@anthropic-ai/sdk": "^0.104.1",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }
