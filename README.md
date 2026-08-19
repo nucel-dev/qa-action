@@ -25,15 +25,36 @@ returns an empty list and `/releases/latest` returns 404. With the default
 `version: latest`, resolving the tag fails; with an explicit tag, the asset
 download 404s. Either way the action fails on its first step.
 
-To unblock it, `nucel-dev/nucel-qa` needs to publish releases with assets named
-`nucel-qa-<arch>-<os>` (plus an optional `checksums.txt`) that are reachable
-from the runner — which today also means making the repository public, since the
-install step downloads unauthenticated.
+Publishing releases is necessary but not sufficient. `nucel-dev/nucel-qa` needs
+to publish assets named `nucel-qa-<arch>-<os>` (plus an optional
+`checksums.txt`) that are reachable from the runner — which today also means
+making the repository public, since the install step downloads unauthenticated.
+With that done the run gets past step 1 and then fails at step 2, on the
+readiness probe below. Both have to be fixed before a run reaches the QA
+session.
+
+**The readiness probe cannot succeed either.** After starting the server,
+`action.yml` polls `curl -sf http://127.0.0.1:18080/mcp` for 30 seconds.
+`nucel-qa` mounts its MCP service at `/mcp` in stateful mode, so a bare `GET`
+reaches rmcp's GET handler — and rmcp 1.7.0, the version pinned in `nucel-qa`'s
+`Cargo.lock`, rejects it. `curl` sends `Accept: */*`, and the handler answers
+`406 Not Acceptable: Client must accept text/event-stream`. `curl -f` treats
+4xx as failure, so `READY` is never set to 1. Sending the header the handler
+asks for does not help: it then answers `400 Bad Request: Session ID is
+required`. There is no plain health endpoint to probe. After 30 attempts the
+step prints `Error: nucel-qa did not become ready within 30s` and exits 1.
 
 **Nothing downstream of the install step has been exercised.** The
 [`smoke-test`](.github/workflows/test.yml) workflow has a job that runs the
-action against a sandbox URL, but that job has been skipped on every run to date
-because no `ANTHROPIC_API_KEY` secret is configured. Green CI on this repository
+action against a sandbox URL. That job is not skipped — it runs and reports
+success. The four steps inside it that do the real work (`Resolve sandbox URL`,
+`Run action (self-test)`, `Verify outputs are populated`, `Upload smoke-test
+report`) are each gated on `steps.check-key.outputs.skip != 'true'`, and no
+`ANTHROPIC_API_KEY` secret is configured, so all four have been skipped on every
+run to date while the job stayed green.
+
+That distinction is the trap: a skipped job is visibly absent, whereas a green
+job that skipped its own work looks like a pass. Green CI on this repository
 means the YAML parses, dependencies install, and the unit tests in
 `scripts/lib.test.mjs` pass — it does not mean the action works end to end.
 
@@ -43,10 +64,10 @@ means the YAML parses, dependencies install, and the unit tests in
 |------|-------|
 | Installing `nucel-qa` | Broken — no releases to download (above) |
 | Finding counts and `fail-on-severity` | Unreliable — see [Severity counting](#severity-counting-is-unreliable) |
-| `chrome-flags` input | No effect — see [Inputs](#inputs) |
+| `chrome-flags` input | No effect on Chrome — see [Inputs](#inputs) |
 | `personas` input | Advisory only — passed in the prompt, not enforced |
 | macOS and Windows runners | Untested; the report path and teardown assume POSIX |
-| Server readiness probe | Unverified — the probe expects a 2xx from a bare `GET /mcp` |
+| Server readiness probe | Broken — a bare `GET /mcp` answers 406, never 2xx (above) |
 
 Everything below describes what the code does. Where behaviour is unverified,
 it says so.
@@ -111,8 +132,9 @@ jobs:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-As noted above, this will currently fail at the install step until `nucel-qa`
-publishes downloadable releases.
+As noted above, this currently fails at the install step, and would fail at the
+readiness probe even once `nucel-qa` publishes downloadable releases. Both
+blockers are described in [Status](#status-alpha-and-currently-not-installable).
 
 ---
 
@@ -123,11 +145,11 @@ publishes downloadable releases.
 | `url` | yes | — | Target URL. Validated as `http(s)` before the session starts. |
 | `anthropic-api-key` | yes | — | Anthropic API key. |
 | `personas` | no | all 7 | Comma-separated persona list. **Advisory**: the value is interpolated into the prompt, not passed as an argument to `qa_run_personas_parallel`, so the model may not honour it exactly. |
-| `chrome-flags` | no | `''` | **No effect today.** The value is appended to the `nucel-qa` command line, but `nucel-qa` only inspects its arguments for `--headless`; its Chrome flags are compiled in. |
-| `comment-on-pr` | no | `true` | Post the report as a PR comment. Only runs on `pull_request` events. Each run adds a **new** comment — it does not update a previous one. |
+| `chrome-flags` | no | `''` | **No effect on Chrome today.** The value is appended to the `nucel-qa` command line and expanded unquoted, so it is word-split into `nucel-qa`'s own argv — it is not inert, it just never reaches the browser. `nucel-qa` inspects its arguments only for `--headless`; the Chrome flags themselves are compiled in (`src/browser.rs`). |
+| `comment-on-pr` | no | `true` | Post the report as a PR comment. Needs a `pull_request` event **and** every earlier step to have succeeded: the step's `if` carries no status function, so GitHub prepends an implicit `success() &&` and skips it whenever the QA session exited non-zero — including exit 2, the severity gate. See [Exit codes](#exit-codes). Each run adds a **new** comment — it does not update a previous one. |
 | `version` | no | `latest` | `nucel-qa` release tag. `latest` resolves via an unauthenticated call to the GitHub API, which is subject to the 60-requests-per-hour anonymous rate limit. |
 | `model` | no | `claude-opus-4-6` | Claude model ID. |
-| `fail-on-severity` | no | `none` | Fail the workflow on findings at or above this severity: `none`, `low`, `medium`, `high`, `critical`. See the caveat below. |
+| `fail-on-severity` | no | `none` | Fail the workflow on findings at or above this severity: `none`, `low`, `medium`, `high`, `critical`. Any other value is **silently ignored** — the gate is skipped and the step still exits 0. See the caveat below. |
 
 ### Available personas
 
@@ -192,6 +214,17 @@ severity-first list or table of its own. Do not gate a merge on
 `fail-on-severity` until the counter and the server's severity vocabulary are
 reconciled.
 
+There is a second trap in the same area, and it is sharpened by the paragraph
+above. `fail-on-severity` accepts `none`, `low`, `medium`, `high`, `critical`;
+**any other value is skipped, not rejected.** `evaluateSeverityGate` in
+[`scripts/lib.mjs`](scripts/lib.mjs) returns
+`unknown fail-on-severity value "…" — gate skipped` and the step exits 0. That
+reason is printed to the log with `console.log` — it is not a workflow
+annotation, so nothing flags the run. So once you have read that `nucel-qa`'s
+own severities are `critical | major | minor | info`, the natural next move —
+`fail-on-severity: major` — silently disables the gate you believed you had just
+turned on. Use only the five values listed in the input table.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -203,6 +236,23 @@ reconciled.
 The default `fail-on-severity: none` never produces exit code 2, so adopting the
 action does not break an existing pipeline. Given the counting problem above,
 exit code 2 is currently reachable only by accident.
+
+Exit 2 is also the case where `comment-on-pr` quietly does nothing, and it is
+the damaging one. The session completed and a full report is sitting on disk,
+but the step exited non-zero, and the **Post PR comment** step's `if` carries no
+status function — so GitHub prepends an implicit `success() &&` and skips it.
+(The adjacent **Stop Nucel QA server** step spells out `if: always()` for
+exactly this reason.) Exit 1 skips the comment as well; there the file holds
+only `(no report generated)`, and a fatal error can abort before it is written
+at all.
+
+`run-qa.mjs` writes the report file ahead of both failure exits, with a comment
+saying it does so "even on failure paths, so downstream steps (artifact upload,
+PR comment) still have something" — the step condition in `action.yml` defeats
+that intent for the PR comment. So the run that most needs the report on the PR
+is the run that will not get one. If you gate on `fail-on-severity`, upload the
+report as an artifact with `if: always()` — as in the example above — rather
+than relying on the comment.
 
 ---
 
@@ -311,8 +361,9 @@ currently enforced by npm, but it means the scripts must stay Node 20-compatible
 
 `.github/workflows/test.yml` runs YAML/JSON validation, `npm ci`, lint, and unit
 tests on every push and PR, plus a weekly cron. Its third job runs the action
-against `https://example.com` — it self-skips when `ANTHROPIC_API_KEY` is not
-configured, which so far has been every run.
+against `https://example.com`; the steps that do so skip themselves when
+`ANTHROPIC_API_KEY` is not configured, which so far has been every run. The job
+itself still runs and reports success.
 
 ### Contributing
 
